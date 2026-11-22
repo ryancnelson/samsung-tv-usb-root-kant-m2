@@ -66,6 +66,20 @@ class OfflineChecks(unittest.TestCase):
             cave.write_bytes(altered)
             self.run_tool('verify_trigger_kant.py', image, '--cave-blob', cave, success=False)
 
+    def test_umh_boot_stage_builds_with_zero_halfwords(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / 'stage.bin'
+            result = self.run_tool('build_kernel_stage_kant_umh.py',
+                                   '--beacon', '192.0.2.10:4444',
+                                   '--out', out, '--boot', '--no-patch')
+            self.assertIn('zero_halfwords=[]', result.stdout)
+            blob = out.read_bytes()
+            self.assertGreater(len(blob), 0)
+            self.assertEqual(len(blob) % 4, 0)
+            zeros = [i for i in range(0, len(blob), 2)
+                     if struct.unpack_from('<H', blob, i)[0] == 0]
+            self.assertEqual(zeros, [])
+
     def test_network_build_requires_explicit_target(self):
         result = self.run_tool('build.py', '--variant', 'umh-boot', success=False)
         self.assertIn('requires --beacon', result.stderr)

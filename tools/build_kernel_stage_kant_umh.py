@@ -38,6 +38,7 @@ of 0xc000xxxx are staged through r6.
 """
 import argparse
 import os
+import re
 import shutil
 import socket
 import struct
@@ -384,10 +385,51 @@ def main():
         src = os.path.join(td, "stage.S")
         obj = os.path.join(td, "stage.o")
         open(src, "w").write(src_text)
-        subprocess.run(
-            [clang, "-target", "armv7-none-eabi", "-march=armv7-a",
-             "-c", src, "-o", obj],
-            check=True)
+        try:
+            subprocess.run(
+                [clang, "-target", "armv7-none-eabi", "-march=armv7-a",
+                 "-c", src, "-o", obj],
+                check=True)
+        except subprocess.CalledProcessError:
+            # Apple clang >= 21 no longer folds forward label differences
+            # into movw/movt immediates ("Relocation Not In Range").
+            # Two-pass fallback: assemble with placeholder immediates, read
+            # the label offsets from the object's symbol table, substitute
+            # the real constants, assemble again. Produces the same .text.
+            placeholder = re.sub(
+                r"#:lower16:\((\w+) - _start \+ 0xc0008470\)",
+                lambda m: "#:lower16:(0x0)", src_text)
+            placeholder = re.sub(
+                r"#:upper16:\((\w+) - _start \+ 0xc0008470\)",
+                lambda m: "#:upper16:(0x0)", placeholder)
+            open(src, "w").write(placeholder)
+            subprocess.run(
+                [clang, "-target", "armv7-none-eabi", "-march=armv7-a",
+                 "-c", src, "-o", obj],
+                check=True)
+            symbols = {}
+            for line in subprocess.run(
+                    [os.environ.get("NM", "nm"), obj],
+                    capture_output=True, text=True, check=True).stdout.splitlines():
+                parts = line.split()
+                if len(parts) == 3 and parts[1] in "tT":
+                    symbols[parts[2]] = int(parts[0], 16)
+            resolved = re.sub(
+                r"#:lower16:\((\w+) - _start \+ 0xc0008470\)",
+                lambda m: f"#:lower16:({symbols[m.group(1)] + 0xc0008470:#x})",
+                src_text)
+            resolved = re.sub(
+                r"#:upper16:\((\w+) - _start \+ 0xc0008470\)",
+                lambda m: f"#:upper16:({symbols[m.group(1)] + 0xc0008470:#x})",
+                resolved)
+            open(src, "w").write(resolved)
+            if a.keep_asm:
+                open(a.keep_asm, "w").write(resolved)
+                print(f"wrote {a.keep_asm}")
+            subprocess.run(
+                [clang, "-target", "armv7-none-eabi", "-march=armv7-a",
+                 "-c", src, "-o", obj],
+                check=True)
         blob = extract_text(obj)
     if len(blob) % 4:
         raise SystemExit(f".text length {len(blob)} is not 4-byte aligned")
